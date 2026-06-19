@@ -24,22 +24,40 @@ class BrowserState:
 
 
 state = BrowserState()
+browser_lock = asyncio.Lock()
+
+LAUNCH_ARGS = [
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+]
+
+
+async def launch_browser() -> Browser:
+    browser = await state.playwright.chromium.launch(headless=True, args=LAUNCH_ARGS)
+    browser.on(
+        "disconnected",
+        lambda: logger.warning("Chromium browser disconnected unexpectedly"),
+    )
+    return browser
+
+
+async def get_browser() -> Browser:
+    if state.browser is not None and state.browser.is_connected():
+        return state.browser
+    async with browser_lock:
+        if state.browser is None or not state.browser.is_connected():
+            logger.warning("Browser not connected, relaunching Chromium...")
+            state.browser = await launch_browser()
+    return state.browser
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Launching Chromium browser...")
     state.playwright = await async_playwright().start()
-    state.browser = await state.playwright.chromium.launch(
-        headless=True,
-        args=[
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--single-process",
-        ],
-    )
+    state.browser = await launch_browser()
     logger.info("Chromium browser ready.")
     yield
     logger.info("Shutting down browser...")
@@ -78,7 +96,8 @@ async def convert_html_to_pdf(
     context = None
     page = None
     try:
-        context = await state.browser.new_context()
+        browser = await get_browser()
+        context = await browser.new_context()
         page = await context.new_page()
 
         await page.set_content(body.html, wait_until="networkidle")
